@@ -482,7 +482,10 @@ with tabs[4]:
     show = res[['ROC-AUC', 'Within-month AUC', 'Accuracy', 'Balanced Acc', 'Precision', 'Recall', 'F1']].astype(float)
     st.dataframe(show.style.format('{:.3f}').highlight_max(axis=0, color='#D5F5E3'), width='stretch')
     st.caption('ROC-AUC: chance the model ranks a real underperformer above a real outperformer. Within-month AUC compares only '
-               'funds on the same date. Baseline = "last year\'s laggard stays a laggard".')
+               'funds on the same date. Baseline = "last year\'s laggard stays a laggard".'
+    st.caption('Note: Gradient Boosting samples rows at random while training, so its test AUC depends on the random seed. '
+               'In the Nov-2026 run, 20 different seeds gave test AUCs from 0.60 to 0.68 (average 0.64); this app uses the '
+               'project seed (42). All seeds stayed well above the 0.5 coin-toss level and the 0.43 baseline.')
 
     st.markdown(f'#### Confusion matrix · {E.BEST}')
     thr = st.slider('Decision threshold - flag a fund when its score is at least', 0.05, 0.95, 0.50, 0.05)
