@@ -126,7 +126,7 @@ def get_tri(online=True):
             old, n = _niftyindices_update(old, today())
             os.makedirs(CACHE_DIR, exist_ok=True)
             old.to_csv(cpath, index=False, date_format='%Y-%m-%d')
-            info.update(official_to=old['Date'].max(), source=f'niftyindices.com (live, +{n} days)')
+            info.update(official_to=old['Date'].max(), source='niftyindices.com (live' + (f', +{n} new days)' if n else ', checked today)'))
         except Exception as e:
             info['source'] = f'stored niftyindices file (live update failed: {type(e).__name__})'
     t = old.set_index('Date')
