@@ -189,3 +189,78 @@ def score_new_fund(env, model, fund, online=True):
     out = score_latest(df, model, env['data_end'])
     missing = [c for c in PRICE_FEATURES if pd.isna(out.loc[out['Scheme Code'] == code, c].iloc[0])]
     return out, code, src, missing, s
+
+
+# ------------------------------------------------------------------ explanations
+NICE = {
+    'Fund_Ret_3M': 'Fund return 3M', 'Bench_Ret_3M': 'Index return 3M', 'Excess_3M': 'Excess return 3M',
+    'Fund_Ret_6M': 'Fund return 6M', 'Bench_Ret_6M': 'Index return 6M', 'Excess_6M': 'Excess return 6M',
+    'Fund_Ret_1Y': 'Fund return 1Y', 'Bench_Ret_1Y': 'Index return 1Y', 'Excess_1Y': 'Excess return 1Y',
+    'Fund_Ret_2Y': 'Fund return 2Y (ann.)', 'Bench_Ret_2Y': 'Index return 2Y (ann.)', 'Excess_2Y': 'Excess return 2Y (ann.)',
+    'Fund_Ret_3Y': 'Fund return 3Y (ann.)', 'Bench_Ret_3Y': 'Index return 3Y (ann.)', 'Excess_3Y': 'Excess return 3Y (ann.)',
+    'Fund_Vol_1Y': 'Fund volatility 1Y', 'Bench_Vol_1Y': 'Index volatility 1Y', 'TE_1Y': 'Tracking error 1Y', 'Beta_1Y': 'Beta 1Y',
+    'Fund_MaxDD_1Y': 'Fund max drawdown 1Y', 'Bench_MaxDD_1Y': 'Index max drawdown 1Y',
+    'Fund_Vol_3Y': 'Fund volatility 3Y', 'Bench_Vol_3Y': 'Index volatility 3Y', 'TE_3Y': 'Tracking error 3Y', 'Beta_3Y': 'Beta 3Y',
+    'Fund_MaxDD_3Y': 'Fund max drawdown 3Y', 'Bench_MaxDD_3Y': 'Index max drawdown 3Y',
+    'IR_1Y': 'Information ratio 1Y', 'IR_3Y': 'Information ratio 3Y', 'Ret_per_Vol_1Y': 'Return per unit risk 1Y',
+    'Hit_Rate_12M': 'Months beating index (12M)', 'Hit_Rate_36M': 'Months beating index (36M)',
+    'Up_Capture_3Y': 'Up-market capture 3Y', 'Down_Capture_3Y': 'Down-market capture 3Y',
+    'Excess_1Y_Change_6M': 'Change in 1Y excess vs 6M ago', 'Fund_Age_Yrs': 'Fund age (years)',
+    'CatRank_Excess_1Y': 'Category rank, 1Y excess', 'CatRank_Excess_3Y': 'Category rank, 3Y excess', 'CatRank_IR_1Y': 'Category rank, IR 1Y',
+    'TER_Direct': 'Expense ratio', 'TER_vs_Cat_Median': 'Expense ratio vs peers', 'Log_AUM': 'Fund size (log AUM)',
+    'AUM_Growth_1Y': 'AUM growth 1Y', 'Net_Flow_1Y': 'Net inflows 1Y', 'CatRank_AUM': 'Size rank in category',
+}
+PCT_FEATS = {c for c in NUM_FEATURES if c.startswith(('Fund_Ret', 'Bench_Ret', 'Excess', 'Fund_Vol', 'Bench_Vol', 'TE_', 'Fund_MaxDD',
+                                                     'Bench_MaxDD', 'Hit_Rate', 'AUM_Growth', 'Net_Flow'))}
+
+
+def fmt_feat(c, v):
+    if v is None or pd.isna(v):
+        return '–'
+    if c in PCT_FEATS:
+        return f'{v:+.1%}' if c.startswith(('Excess', 'Fund_Ret', 'Bench_Ret', 'AUM_Growth', 'Net_Flow')) else f'{v:.1%}'
+    if c == 'Log_AUM':
+        return f'Rs {np.exp(v):,.0f} cr'
+    if c in ('TER_Direct', 'TER_vs_Cat_Median'):
+        return f'{v:.2f}%' if c == 'TER_Direct' else f'{v:+.2f} pp'
+    return f'{v:.2f}'
+
+
+def importance(model):
+    """Feature importance of the final Gradient Boosting model (Category dummies summed)."""
+    imp = model.named_steps['model'].feature_importances_
+    names = list(NUM_FEATURES) + ['Category'] * (len(imp) - len(NUM_FEATURES))
+    s = pd.Series(imp, index=names).groupby(level=0).sum().sort_values(ascending=False)
+    return s
+
+
+def risk_direction(df):
+    """+1 if higher values went with more underperformance in the training years (Spearman), else -1."""
+    tr = df[df.Split_1Y == 'Train']
+    return {c: (1 if tr[c].corr(tr[TARGET], method='spearman') > 0 else -1) for c in NUM_FEATURES}
+
+
+def drivers(row, universe, imp, direction, k=8):
+    """Top-k most important features: this fund's value vs its category today, and which way it pushes."""
+    peers = universe[universe['Category'] == row['Category']]
+    out = []
+    for c in [f for f in imp.index if f in NUM_FEATURES and not f.startswith('Bench_')][:k]:
+        med = peers[c].median()
+        v = row[c]
+        if pd.isna(v) or pd.isna(med) or abs(v - med) < 1e-9:
+            push = '● neutral'
+        else:
+            push = '▲ raises risk' if (v - med) * direction[c] > 0 else '▼ lowers risk'
+        out.append({'Factor': NICE.get(c, c), 'This fund': fmt_feat(c, v), 'Category median': fmt_feat(c, med),
+                    'Importance': imp[c], 'Effect vs peers': push})
+    return pd.DataFrame(out)
+
+
+def tier_backtest(test):
+    """Within each test month, tier funds by predicted P and measure how many actually underperformed."""
+    t = test.copy()
+    t['Rank'] = t.groupby('Obs Date')['P'].rank(ascending=False, method='first')
+    t['N'] = t.groupby('Obs Date')['P'].transform('size')
+    t['Tier'] = risk_tier(t['Rank'] / t['N'])
+    g = t.groupby('Tier').agg(Rows=(TARGET, 'size'), Underperformed=(TARGET, 'mean'), Avg_Excess=('Fwd_Excess_1Y', 'mean'))
+    return g.reindex(['High', 'Elevated', 'Watch', 'Low'])

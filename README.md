@@ -4,10 +4,14 @@ Predicts whether an Indian equity mutual fund (Direct, Growth) will **underperfo
 Built from the PGDM-BIFS (GIM) ML project *"Predicting Mutual Fund Benchmark Underperformance Using Machine Learning"*.
 
 ## What the app does
-* **Check a fund**: pick one of the 30 project funds, or add any equity fund by its scheme code (search by name built in), then click **Run**.
-  You get the probability of underperforming, a relative risk tier (High / Elevated / Watch / Low), rule-based warning signs and charts.
-* **Early-warning list**: all 30 funds ranked, downloadable as CSV.
-* **Model performance**: test metrics, confusion matrix with an adjustable threshold, ROC curve, results by quarter.
+* **Fund check**: pick one of the 30 project funds, or any equity fund by name / scheme code, then click **Run**:
+  risk gauge, tier, rank, warning signs, "why this score" factors, growth / excess-return / drawdown charts,
+  the model's out-of-sample track record on that fund, and a downloadable fund report.
+* **Compare funds**: up to 4 funds side by side with an overlaid growth chart.
+* **Portfolio check**: enter holdings and amounts; get a weighted risk score, money by tier and lower-risk peer suggestions.
+* **Watchlist**: all 30 funds ranked with filters, a risk-vs-return bubble chart and CSV download.
+* **Model & backtest**: tier backtest (how often each tier actually underperformed), model comparison,
+  confusion matrix with threshold slider, ROC curve, feature importance, results by quarter.
 * **Always uses today's date**: on the first visit each day the app downloads the latest NAVs (mfapi.in) and index values
   (niftyindices.com, or an index-fund proxy for days not yet published), rebuilds the feature panel, retrains
   (train ≤ Dec-2024, test = 2025 snapshots whose 12-month outcome is known) and scores the latest date. Later visits that day reuse the result.
