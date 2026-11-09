@@ -84,18 +84,32 @@ def _store():
 
 def daily_run(day: str, force=False):
     S = _store()
+    if S['lock'].locked():
+        wait = st.info('The daily data refresh is running for another visitor - this page will load in a moment...')
+    else:
+        wait = None
     with S['lock']:
+        if wait:
+            wait.empty()
         if force or S['day'] != day:
             box = st.status(f'Running the model for {day} - first visit today, about a minute...', expanded=True)
             say = lambda m: box.write(m)
-            env = E.load_all(online=True, progress=say)
-            df = E.build_panel(env, progress=say)
-            tt = E.train_test(df, progress=say)
-            sc = E.score_latest(df, tt['final'], env['data_end'])
-            say('Explaining the model')
-            extra = dict(imp=E.importance(tt['final']), dir=E.risk_direction(df), tiers=E.tier_backtest(tt['test']))
+            try:
+                env = E.load_all(online=True, force=force, progress=say)
+                df = E.build_panel(env, progress=say)
+                tt = E.train_test(df, progress=say)
+                sc = E.score_latest(df, tt['final'], env['data_end'])
+                say('Explaining the model')
+                extra = dict(imp=E.importance(tt['final']), dir=E.risk_direction(df), tiers=E.tier_backtest(tt['test']))
+            except Exception as e:
+                box.update(label='Refresh failed', state='error')
+                if S['out'] is None:
+                    st.error(f'The model could not be run right now ({type(e).__name__}: {e}). Please try again in a few minutes.')
+                    st.stop()
+                st.warning(f'Today\'s data refresh failed ({type(e).__name__}); showing the last successful run.')
+                return S['out']
             box.update(label="Done - model trained, tested and today's scores are ready", state='complete', expanded=False)
-            S['out'], S['day'] = (env, df, tt, sc, extra), day
+            S['out'], S['day'], S['at'] = (env, df, tt, sc, extra), day, pd.Timestamp.now()
         return S['out']
 
 
@@ -131,7 +145,10 @@ with st.sidebar:
     st.write('**Expense ratio / AUM:** AMFI disclosures stored with the app')
     if env['stale']:
         st.warning('NAV older than 5 days for: ' + ', '.join(env['stale']))
-    if st.button('🔄 Re-download data now', width='stretch'):
+    last = _store().get('at')
+    cool = last is not None and pd.Timestamp.now() - last < pd.Timedelta(minutes=15)
+    if st.button('🔄 Re-download data now', width='stretch', disabled=cool,
+                 help='Available 15 minutes after the last refresh' if cool else 'Downloads the latest NAVs and index values and reruns the model'):
         st.session_state['force'] = True
         st.rerun()
     st.divider()
@@ -141,12 +158,17 @@ tabs = st.tabs(['🔍 Fund check', '⚖️ Compare funds', '💼 Portfolio check
 
 
 # ------------------------------------------------------------------ shared views
-def gauge(p, tier):
+def gauge(p, tier, universe):
+    # colour bands = today's tier cut-offs (tiers are relative ranks, not fixed probability levels)
+    q = universe['P'].sort_values(ascending=False).to_numpy()
+    n = len(q)
+    cut = lambda f: float(q[max(int(round(f * n)) - 1, 0)]) * 100
+    hi, el, wa = cut(0.2), cut(0.5), cut(0.8)
     fig = go.Figure(go.Indicator(
         mode='gauge+number', value=p * 100, number={'suffix': '%', 'font': {'size': 40, 'color': TIER_COLOR[tier]}},
         gauge={'axis': {'range': [0, 100], 'ticksuffix': '%'}, 'bar': {'color': TIER_COLOR[tier], 'thickness': .28},
-               'steps': [{'range': [0, 35], 'color': '#E9F7EF'}, {'range': [35, 55], 'color': '#FEF9E7'},
-                         {'range': [55, 75], 'color': '#FEF5E7'}, {'range': [75, 100], 'color': '#FDEDEC'}],
+               'steps': [{'range': [0, wa], 'color': '#E9F7EF'}, {'range': [wa, el], 'color': '#FEF9E7'},
+                         {'range': [el, hi], 'color': '#FEF5E7'}, {'range': [hi, 100], 'color': '#FDEDEC'}],
                'borderwidth': 0}))
     fig.update_layout(height=220, margin=dict(t=20, b=0, l=45, r=45), font=dict(family='Inter'))
     return fig
@@ -180,9 +202,9 @@ def show_fund(r, universe, note=None, s=None, own=True):
                 f"benchmark {r['Benchmark']}</div>", unsafe_allow_html=True)
     g1, g2 = st.columns([1, 2])
     with g1:
-        st.plotly_chart(gauge(r['P'], tier), width='stretch', config={'displayModeBar': False})
+        st.plotly_chart(gauge(r['P'], tier, universe), width='stretch', config={'displayModeBar': False})
         st.markdown(f"<div class='gauge-note'>Chance of trailing <b>{r['Benchmark']}</b> from {de:%d %b %Y} to "
-                    f"{horizon:%d %b %Y}</div>", unsafe_allow_html=True)
+                    f"{horizon:%d %b %Y}. Band colours show today's tier cut-offs.</div>", unsafe_allow_html=True)
     with g2:
         k = st.columns(3)
         kpi(k[0], 'Rank (1 = riskiest)', f"{int(r['Rank'])}/{len(universe)}", 'among funds scored today')
@@ -280,7 +302,12 @@ with tabs[0]:
         guess = 2
         if code_default and q:
             n = sel['schemeName'].lower()
-            guess = 1 if 'mid' in n and 'cap' in n and 'large' not in n else 0 if 'large' in n or 'bluechip' in n or 'top 100' in n else 2
+            if 'large & mid' in n or 'large and mid' in n or 'multi' in n or 'flexi' in n or 'focused' in n:
+                guess = 2
+            elif 'mid' in n and 'small' not in n:
+                guess = 1
+            elif 'large' in n or 'bluechip' in n or 'top 100' in n:
+                guess = 0
         cat = b.selectbox('Category', list(D.BM.keys()), index=guess)
         ter = c3.number_input('Expense ratio % (optional)', min_value=0.0, max_value=3.0, value=None, step=0.01,
                               help='Direct plan TER. Blank = category median.')
@@ -312,13 +339,15 @@ with tabs[0]:
                 out, code, src, missing, s = E.score_new_fund(env, tt['final'], fd)
             r = out[out['Scheme Code'] == code].iloc[0]
             note = []
-            if fd['TER'] is None:
-                note.append('Expense ratio not given: category median used.')
-            if fd['AUM_Cr'] is None:
-                note.append('AUM not given: size features filled with typical values.')
+            if code in set(env['funds']['Scheme Code']):
+                note.append('This is one of the 30 project funds, so its known category and benchmark were used.')
+            if r['TER_Imputed'] == 1:
+                note.append('Expense ratio not available: category median used.')
+            if pd.isna(r['AUM_Cr']):
+                note.append('AUM not available: size features filled with typical values.')
             if missing:
-                note.append(f'Fund is younger than 3 years: {len(missing)} long-window features filled with typical values.')
-            note.append('Rank and tier are relative to the 30 project funds plus this fund.')
+                note.append(f'Short history: {len(missing)} long-window features filled with typical values.')
+            note.append(f'Rank and tier are relative to the {len(out)} funds scored together.')
             show_fund(r, out, ' '.join(note), s=s, own=False)
         except Exception as e:
             st.error(f'Could not score scheme {fd["Scheme Code"]}: {e}')
@@ -446,8 +475,8 @@ with tabs[4]:
                            text=[f'{v:+.1%}' for v in tb['Avg_Excess']], textposition='outside'))
     fig.update_layout(title='Backtest: average next-12M excess return, by tier', yaxis_tickformat='.1%')
     c2.plotly_chart(style_fig(fig, 360), width='stretch')
-    st.caption(f'Each 2025 month the funds were tiered by the model score (no hindsight), then followed for 12 months. '
-               f'High = riskiest 20%, Low = safest 20%.')
+    st.caption('Each 2025 month the funds were tiered by the model score (no hindsight), then followed for 12 months. '
+               'High = riskiest 20%, Low = safest 20%.')
 
     st.markdown('#### Model comparison on the test set')
     show = res[['ROC-AUC', 'Within-month AUC', 'Accuracy', 'Balanced Acc', 'Precision', 'Recall', 'F1']].astype(float)
@@ -498,7 +527,7 @@ with tabs[4]:
 # ------------------------------------------------------------------ 6. Method
 with tabs[5]:
     c1, c2 = st.columns(2)
-    c1.markdown(f"""
+    c1.markdown("""
 <div class='card'><h4>❓ The question</h4>Will the fund's return over the next 12 months be <b>lower than its benchmark
 Total Return Index</b> (dividends reinvested)? The model answers with a probability.</div>
 <div class='card'><h4>🗄 Data (refreshed daily)</h4>

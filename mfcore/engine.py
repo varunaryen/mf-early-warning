@@ -74,17 +74,16 @@ def risk_tier(rank_pct):
 
 
 # ------------------------------------------------------------------ data
-def load_all(online=True, extra=None, progress=lambda *a: None):
-    """Download/refresh everything. extra: list of dicts for user-added funds
-    {Fund, Category, AMC, Scheme Code} (+ optional TER, AUM_Cr)."""
+def load_all(online=True, force=False, progress=lambda *a: None):
+    """Download/refresh NAVs and index values for the 30 funds (force = ignore today's download cache)."""
     funds = D.load_funds()
     progress('Loading index (TRI) data')
-    tri, tri_info = D.get_tri(online)
+    tri, tri_info = D.get_tri(online, force)
     nav, src = {}, {}
     codes = list(funds['Scheme Code'])
     for i, code in enumerate(codes):
         progress(f'Fetching latest NAV {i + 1}/{len(codes)}')
-        j, s = D.get_nav_json(code, online)
+        j, s = D.get_nav_json(code, online, force)
         nav[code] = D.nav_series(j)
         src[code] = s
     nav_last = pd.Series({c: s.index[-1] for c, s in nav.items()})
@@ -169,6 +168,9 @@ def score_new_fund(env, model, fund, online=True):
         raise ValueError(f"Latest NAV for {code} is {s.index[-1]:%d-%b-%Y}; the scheme may be closed or merged.")
     if s.index[0] > env['data_end'] - pd.DateOffset(years=1):
         raise ValueError('The fund needs at least 1 year of NAV history to be scored.')
+    known = env['funds'][env['funds']['Scheme Code'] == code]
+    if len(known):   # one of the 30 project funds: always use its known category / benchmark
+        fund = {**fund, 'Category': known['Category'].iloc[0], 'Fund': known['Fund'].iloc[0], 'AMC': known['AMC'].iloc[0]}
     nav = dict(env['nav'])
     nav[code] = s
     row = {'Fund': fund.get('Fund') or meta.get('scheme_name', str(code)), 'Category': fund['Category'],
@@ -177,11 +179,11 @@ def score_new_fund(env, model, fund, online=True):
     funds = pd.concat([funds[funds['Scheme Code'] != code], pd.DataFrame([row])], ignore_index=True)
     df = F.build_panel(nav, env['tri'], funds, env['data_end'], only_latest=True)
     ter, aum = env['ter'], env['aum']
-    ter = ter[ter['Scheme Code'] != code]
-    aum = aum[aum['Scheme Code'] != code]
-    if fund.get('TER') is not None:
+    if fund.get('TER') is not None:   # user value replaces any stored AMFI value; blank keeps it
+        ter = ter[ter['Scheme Code'] != code]
         ter = pd.concat([ter, pd.DataFrame([{'Scheme Code': code, 'Date': env['data_end'], 'TER_Direct': float(fund['TER'])}])])
     if fund.get('AUM_Cr') is not None:
+        aum = aum[aum['Scheme Code'] != code]
         q = (env['data_end'] - pd.DateOffset(months=2)).to_period('Q').end_time.normalize()
         aum = pd.concat([aum, pd.DataFrame([{'Scheme Code': code, 'Quarter End': q, 'AUM_Cr': float(fund['AUM_Cr'])}])])
     df = C.add_ter(df, ter)
@@ -247,7 +249,9 @@ def drivers(row, universe, imp, direction, k=8):
     for c in [f for f in imp.index if f in NUM_FEATURES and not f.startswith('Bench_')][:k]:
         med = peers[c].median()
         v = row[c]
-        if pd.isna(v) or pd.isna(med) or abs(v - med) < 1e-9:
+        if pd.isna(v) or pd.isna(med):
+            push = '– no data (typical value used)'
+        elif abs(v - med) < 1e-9:
             push = '● neutral'
         else:
             push = '▲ raises risk' if (v - med) * direction[c] > 0 else '▼ lowers risk'

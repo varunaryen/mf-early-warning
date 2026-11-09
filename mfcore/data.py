@@ -8,7 +8,6 @@ import json
 import os
 import tempfile
 
-import numpy as np
 import pandas as pd
 
 ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..')
@@ -52,13 +51,15 @@ def fetch_mfapi(code, timeout=30):
     return j
 
 
-def get_nav_json(code, online=True):
+def get_nav_json(code, online=True, force=False):
     """Latest NAV history for a scheme: live from MFAPI (cached for the day), else the copy in data/nav."""
     os.makedirs(os.path.join(CACHE_DIR, 'nav'), exist_ok=True)
     cpath = os.path.join(CACHE_DIR, 'nav', f'{int(code)}.json')
     seed = os.path.join(DATA, 'nav', f'{int(code)}.json')
     if online and not OFFLINE:
-        if os.path.exists(cpath) and pd.Timestamp(os.path.getmtime(cpath), unit='s').date() == pd.Timestamp.now().date():
+        # reuse today's download (India date) unless a fresh download is forced
+        fetched = pd.Timestamp(os.path.getmtime(cpath), unit='s', tz='UTC').tz_convert('Asia/Kolkata').date() if os.path.exists(cpath) else None
+        if not force and fetched == today().date():
             return json.load(open(cpath)), 'live (cached today)'
         try:
             j = fetch_mfapi(code)
@@ -112,7 +113,7 @@ def _niftyindices_update(old, end):
     return pd.concat([old, add]).drop_duplicates('Date', keep='first').sort_values('Date'), len(add)
 
 
-def get_tri(online=True):
+def get_tri(online=True, force=False):
     """Returns (dict name -> Series, info dict)."""
     old = pd.read_csv(os.path.join(DATA, 'nifty_tri_history.csv'), parse_dates=['Date'])
     cpath = os.path.join(CACHE_DIR, 'tri.csv')
@@ -134,7 +135,7 @@ def get_tri(online=True):
     # extend each series past the last official date with its index-fund proxy
     for name, code in TRI_PROXY.items():
         try:
-            p = nav_series(get_nav_json(code, online)[0])
+            p = nav_series(get_nav_json(code, online, force)[0])
         except Exception:
             continue
         s = tri[name]
