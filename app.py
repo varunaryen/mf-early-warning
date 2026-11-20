@@ -82,6 +82,72 @@ def _store():
     return {'lock': threading.Lock(), 'day': None, 'out': None}
 
 
+class _Loader:
+    """One clean loading card (spinner + progress bar + current step) instead of a line per NAV fetched."""
+    STAGES = [('Loading index', 4, 'Loading benchmark index data'),
+              ('Fetching latest NAV', None, 'Fetching the latest fund prices'),
+              ('Building the monthly', 55, 'Building monthly fund snapshots'),
+              ('Adding expense', 62, 'Adding cost and fund-size data'),
+              ('Training', None, 'Training and testing the models'),
+              ('Refitting', 92, 'Finalising the selected model'),
+              ('Explaining', 97, "Preparing today's risk scores")]
+
+    def __init__(self, day):
+        self.ph, self.pct, self.label, self.trained = st.empty(), 0, 'Starting up', 0
+        self.day = pd.Timestamp(day)
+        self._draw()
+
+    def _draw(self):
+        self.ph.markdown(f"""
+<style>
+@keyframes mfspin {{ to {{ transform: rotate(360deg); }} }}
+.mf-load {{ max-width: 560px; margin: 12vh auto 0; padding: 34px 38px; border: 1px solid #E3E7EE; border-radius: 16px;
+  background: #fff; box-shadow: 0 10px 30px rgba(15,30,60,.08); text-align: center; font-family: Inter, sans-serif; }}
+.mf-spin {{ width: 46px; height: 46px; margin: 0 auto 18px; border: 4px solid #E8ECF3; border-top-color: #F37020;
+  border-radius: 50%; animation: mfspin .9s linear infinite; }}
+.mf-load h3 {{ margin: 0 0 6px; font-size: 1.25rem; color: #13213C; }}
+.mf-load p {{ margin: 0; color: #6B7280; font-size: .92rem; }}
+.mf-bar {{ height: 8px; background: #EEF1F5; border-radius: 99px; margin: 22px 0 10px; overflow: hidden; }}
+.mf-bar > div {{ height: 100%; background: linear-gradient(90deg, #F37020, #F7A46B); border-radius: 99px;
+  transition: width .4s ease; }}
+.mf-step {{ display: flex; justify-content: space-between; font-size: .88rem; color: #374151; }}
+</style>
+<div class='mf-load'>
+  <div class='mf-spin'></div>
+  <h3>Preparing today's early-warning scores</h3>
+  <p>First visit on {self.day:%d %b %Y} - fresh data is being loaded and the model retrained. This takes about a minute.</p>
+  <div class='mf-bar'><div style='width:{self.pct}%'></div></div>
+  <div class='mf-step'><span>{self.label}...</span><b>{self.pct}%</b></div>
+</div>""", unsafe_allow_html=True)
+
+    def step(self, msg):
+        msg = str(msg)
+        for key, pct, label in self.STAGES:
+            if msg.startswith(key):
+                if key == 'Fetching latest NAV':
+                    try:
+                        i, n = (int(x) for x in msg.rsplit(' ', 1)[-1].split('/'))
+                        pct = 5 + int(48 * i / max(n, 1))
+                    except ValueError:
+                        pct = self.pct
+                elif key == 'Training':
+                    self.trained += 1
+                    pct = min(90, 64 + 3 * self.trained)
+                pct = max(pct, self.pct)
+                if pct != self.pct or label != self.label:
+                    self.pct, self.label = pct, label
+                    self._draw()
+                return
+
+    def finish(self):
+        self.pct, self.label = 100, 'Ready'
+        self._draw()
+        self.ph.empty()
+
+    def clear(self):
+        self.ph.empty()
+
+
 def daily_run(day: str, force=False):
     S = _store()
     if S['lock'].locked():
@@ -92,8 +158,8 @@ def daily_run(day: str, force=False):
         if wait:
             wait.empty()
         if force or S['day'] != day:
-            box = st.status(f'Running the model for {day} - first visit today, about a minute...', expanded=True)
-            say = lambda m: box.write(m)
+            box = _Loader(day)
+            say = box.step
             try:
                 env = E.load_all(online=True, force=force, progress=say)
                 df = E.build_panel(env, progress=say)
@@ -102,13 +168,13 @@ def daily_run(day: str, force=False):
                 say('Explaining the model')
                 extra = dict(imp=E.importance(tt['final']), dir=E.risk_direction(df), tiers=E.tier_backtest(tt['test']))
             except Exception as e:
-                box.update(label='Refresh failed', state='error')
+                box.clear()
                 if S['out'] is None:
                     st.error(f'The model could not be run right now ({type(e).__name__}: {e}). Please try again in a few minutes.')
                     st.stop()
                 st.warning(f'Today\'s data refresh failed ({type(e).__name__}); showing the last successful run.')
                 return S['out']
-            box.update(label="Done - model trained, tested and today's scores are ready", state='complete', expanded=False)
+            box.finish()
             S['out'], S['day'], S['at'] = (env, df, tt, sc, extra), day, pd.Timestamp.now()
         return S['out']
 
