@@ -14,6 +14,7 @@ import streamlit as st
 
 from mfcore import data as D
 from mfcore import engine as E
+import model_tab
 
 st.set_page_config(page_title='MF Early-Warning', page_icon='📉', layout='wide', initial_sidebar_state='collapsed')
 
@@ -522,76 +523,9 @@ with tabs[3]:
     fig.update_layout(title='Average score by category (bars show min-max)', yaxis_tickformat='.0%', yaxis_range=[0, 1])
     c2.plotly_chart(style_fig(fig, 400), width='stretch')
 
-# ------------------------------------------------------------------ 5. Model & backtest
+# ------------------------------------------------------------------ 5. Model & backtest (plain language)
 with tabs[4]:
-    ts, te_ = tt['train_span'], tt['test_span']
-    k = st.columns(4)
-    kpi(k[0], 'Training data', f"{tt['n_train']:,}", f"fund-months · {ts[0]:%b %Y} – {ts[1]:%b %Y}")
-    kpi(k[1], 'Test data (unseen)', f"{tt['n_test']:,}", f"predictions {te_[0]:%b %Y} – {te_[1]:%b %Y}")
-    kpi(k[2], 'Test ROC-AUC', f"{best['ROC-AUC']:.3f}", '0.5 = coin toss')
-    kpi(k[3], 'Test accuracy', pct(best['Accuracy']), f"base rate {tt['base_test']:.0%} underperformed")
-    st.markdown('')
-    c1, c2 = st.columns(2)
-    fig = go.Figure(go.Bar(x=tb.index, y=tb['Underperformed'], marker_color=[TIER_COLOR[t] for t in tb.index],
-                           text=[f'{v:.0%}' for v in tb['Underperformed']], textposition='outside'))
-    fig.add_hline(y=tt['base_test'], line_dash='dot', annotation_text=f"all funds {tt['base_test']:.0%}")
-    fig.update_layout(title='Backtest: share that actually underperformed, by tier', yaxis_tickformat='.0%', yaxis_range=[0, 1])
-    c1.plotly_chart(style_fig(fig, 360), width='stretch')
-    fig = go.Figure(go.Bar(x=tb.index, y=tb['Avg_Excess'], marker_color=[TIER_COLOR[t] for t in tb.index],
-                           text=[f'{v:+.1%}' for v in tb['Avg_Excess']], textposition='outside'))
-    fig.update_layout(title='Backtest: average next-12M excess return, by tier', yaxis_tickformat='.1%')
-    c2.plotly_chart(style_fig(fig, 360), width='stretch')
-    st.caption('Each 2025 month the funds were tiered by the model score (no hindsight), then followed for 12 months. '
-               'High = riskiest 20%, Low = safest 20%.')
-
-    st.markdown('#### Model comparison on the test set')
-    show = res[['ROC-AUC', 'Within-month AUC', 'Accuracy', 'Balanced Acc', 'Precision', 'Recall', 'F1']].astype(float)
-    st.dataframe(show.style.format('{:.3f}').highlight_max(axis=0, color='#D5F5E3'), width='stretch')
-    st.caption('ROC-AUC: chance the model ranks a real underperformer above a real outperformer. Within-month AUC compares only '
-               'funds on the same date. Baseline = "last year\'s laggard stays a laggard".')
-    st.caption('Note: Gradient Boosting samples rows at random while training, so its test AUC depends on the random seed. '
-               'In the Nov-2026 run, 20 different seeds gave test AUCs from 0.60 to 0.68 (average 0.64); this app uses the '
-               'project seed (42). All seeds stayed well above the 0.5 coin-toss level and the 0.43 baseline.')
-
-    st.markdown(f'#### Confusion matrix · {E.BEST}')
-    thr = st.slider('Decision threshold - flag a fund when its score is at least', 0.05, 0.95, 0.50, 0.05)
-    tst = tt['test']
-    m = E.metrics(tst[E.TARGET].astype(int), tst['P'].to_numpy(), thr)
-    l, r_ = st.columns([1.1, 1])
-    cm = np.array([[m['TN'], m['FP']], [m['FN'], m['TP']]])
-    lab = np.array([['True negative', 'False alarm'], ['Missed laggard', 'Caught laggard']])
-    fig = go.Figure(go.Heatmap(z=cm, x=['Predicted: beats index', 'Predicted: underperforms'], y=['Actual: beat index', 'Actual: underperformed'],
-                               colorscale=[[0, '#EAF2FB'], [1, BLUE]], showscale=False,
-                               text=[[f'<b>{cm[i, j]}</b><br>{lab[i, j]}' for j in range(2)] for i in range(2)],
-                               texttemplate='%{text}', textfont=dict(size=15)))
-    fig.update_yaxes(autorange='reversed')
-    l.plotly_chart(style_fig(fig, 330), width='stretch')
-    with r_:
-        k = st.columns(2)
-        kpi(k[0], 'Accuracy', pct(m['Accuracy']))
-        kpi(k[1], 'Precision', pct(m['Precision']), 'flags that were right')
-        k = st.columns(2)
-        kpi(k[0], 'Recall', pct(m['Recall']), 'laggards caught')
-        kpi(k[1], 'Funds flagged', f"{int(m['TP'] + m['FP'])}/{len(tst)}", f"F1 {m['F1']:.3f}")
-    c1, c2 = st.columns(2)
-    fpr, tpr = tt['roc']
-    fig = go.Figure([go.Scatter(x=fpr, y=tpr, name=f"{E.BEST} (AUC {best['ROC-AUC']:.3f})", fill='tozeroy', line=dict(color=BLUE)),
-                     go.Scatter(x=[0, 1], y=[0, 1], name='Random guess', line=dict(dash='dash', color='grey'))])
-    fig.update_layout(title='ROC curve (test set)', xaxis_title='False positive rate', yaxis_title='True positive rate')
-    c1.plotly_chart(style_fig(fig, 380), width='stretch')
-    imp = X['imp'].head(12)[::-1]
-    fig = go.Figure(go.Bar(x=imp.values, y=[E.NICE.get(i, i) for i in imp.index], orientation='h', marker_color=TEAL))
-    fig.update_layout(title='Top 12 factors the model relies on (feature importance)')
-    c2.plotly_chart(style_fig(fig, 380), width='stretch')
-    q = tst.assign(Q=tst['Obs Date'].dt.to_period('Q').astype(str)).groupby('Q').apply(
-        lambda g: pd.Series({'Rows': len(g), 'Underperformed': g[E.TARGET].mean(),
-                             'AUC': E.roc_auc_score(g[E.TARGET], g['P']) if g[E.TARGET].nunique() == 2 else np.nan}))
-    fig = go.Figure([go.Bar(x=q.index, y=q['AUC'], name='ROC-AUC', marker_color=BLUE, text=[f'{v:.2f}' for v in q['AUC']], textfont=dict(color='white')),
-                     go.Scatter(x=q.index, y=q['Underperformed'], name='Share underperformed', mode='lines+markers',
-                                line=dict(color='#C0392B'))])
-    fig.add_hline(y=.5, line_dash='dot', line_color='#98A2B3')
-    fig.update_layout(title='Results by prediction quarter', yaxis_range=[0, 1])
-    st.plotly_chart(style_fig(fig, 340), width='stretch')
+    model_tab.render(tt, res, sc, X, tb, de, horizon, style_fig, kpi, TIER_COLOR, TIERS)
 
 # ------------------------------------------------------------------ 6. Method
 with tabs[5]:
